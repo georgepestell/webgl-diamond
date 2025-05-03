@@ -1,0 +1,195 @@
+<!doctype html>
+
+<html>
+
+<body>
+   <canvas width="512" height="512" id="gl-canvas">
+      Sorry; your web browser does not support HTML5’s canvas element.
+   </canvas>
+
+   <button onclick="togglePause()">PAUSE</button>
+
+
+   <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"
+      type="text/javascript">
+   </script>
+
+   <script src="core.js"></script>
+   <script src="objects/diamond.js"></script>
+   <script src="objects/cube.js"></script>
+
+   <script>
+      // GLSL shader code
+      // Note that uPerspectiveMatrix, uModelMatrix and uViewMatrix now multiply aPosition
+      const vertCode = `
+            attribute vec4 aPosition;
+            attribute vec4 aColor;
+            attribute vec2 aTexCoord;
+            attribute vec4 aNormal;
+
+            uniform mat4 uModelMatrix;
+            uniform mat4 uViewMatrix;
+            uniform mat4 uPerspectiveMatrix;
+            uniform mat4 uNormalMatrix;
+
+            varying vec4 vColor;
+            varying vec2 vTexCoord;
+            varying vec3 vLighting;
+            void main() {
+               gl_Position = uPerspectiveMatrix * uViewMatrix * uModelMatrix * aPosition;
+
+               highp vec3 ambientLight = vec3(0.5, 0.5, 0.5);
+               highp vec3 directionalColor = vec3(1, 0.4, 1);
+               highp vec3 directionalVector = normalize(vec3(0.85, 0.8, 0.75));
+               highp vec4 transformedNormal = uNormalMatrix * aNormal;
+
+               highp float directional = max(dot(transformedNormal.xyz, directionalVector), 0.0);
+
+               vLighting = ambientLight + (directionalColor * directional);
+               vColor = aColor;
+               vTexCoord = aTexCoord;
+            }
+            `;
+
+      const fragCode = `
+            precision mediump float;
+            varying vec4 vColor;
+            varying vec2 vTexCoord;
+            varying vec3 vLighting;
+            
+            uniform bool useTexture;
+            uniform sampler2D uTexture;
+            void main() {
+
+               if (useTexture ) {
+                  lowp vec4 t = texture2D(uTexture, vTexCoord);
+                  gl_FragColor = vec4(t.rgb * vLighting, vColor.a);
+               } else {
+                  gl_FragColor = vec4(vColor.rgb * vLighting, vColor.a);
+               }
+            }
+            `;  
+   </script>
+
+   <script>
+      // Create a canvas to paint on
+      var canvas = document.getElementById('gl-canvas');
+      var gl = canvas.getContext('webgl');
+
+      glInit();
+      shaderprogram = createProgram(vertCode, fragCode);
+
+      // Create a view matrix. glMatrix helps us here with lookAt function
+      let M_view = mat4.create();
+      mat4.lookAt(M_view, [1.4, 1.5, -2], [0, 0, 0], [0, 1, 0]);
+
+      // Create a perspective matrix. glMatrix helps us here with perspective function
+      let P = mat4.create();
+      mat4.perspective(P, Math.PI / 2, canvas.width / canvas.height, .01, 10);
+
+      // Create object one -- a scaled and translated cube
+      let mossDiamond = diamond();
+      let meatCube = cube();
+      let greenDiamond = diamond();
+
+      let M1_model = mat4.create();
+      mat4.fromScaling(M1_model, [1, 1, 1]);
+      mat4.translate(M1_model, M1_model, [0.0, 0.0, 0]);
+
+      let M2_model = mat4.create();
+      mat4.fromScaling(M2_model, [0.6, 0.6, 0.6]);
+      mat4.translate(M2_model, M2_model, [0.1, 0, 0])
+
+      let M3_model = mat4.create();
+      mat4.fromScaling(M3_model, [0.8, 0.8, 0.8]);
+      mat4.translate(M3_model, M3_model, [2, 0, 0])
+
+
+      // Tell WebGL to use M_view as the GLSL uniform uViewMatrix
+      let ViewLoc = gl.getUniformLocation(shaderprogram, "uViewMatrix");
+      gl.uniformMatrix4fv(ViewLoc, false, new Float32Array(M_view));
+
+      // Tell WebGL to use P as the GLSL uniform uPerspectiveMatrix
+      let PerspLoc = gl.getUniformLocation(shaderprogram, "uPerspectiveMatrix");
+      gl.uniformMatrix4fv(PerspLoc, false, new Float32Array(P));
+
+      let mossTexture = createTexture("textures/moss.jpg");
+      let mossDiamondBuffers = initObject(mossDiamond, shaderprogram, mossTexture);
+
+      let meatTexture = createTexture("textures/meat.jpg");
+      let meatCubeBuffers = initObject(meatCube, shaderprogram, meatTexture);
+
+      let greenDiamondBuffers = initObject(greenDiamond, shaderprogram, null);
+
+      mossDiamondBuffers.M_model = M1_model;
+      meatCubeBuffers.M_model = M2_model;
+      greenDiamondBuffers.M_model = M3_model;
+
+      // We have a matrix that represents eachf object's position, scale, and orientation
+      let objects = [mossDiamondBuffers, greenDiamondBuffers, meatCubeBuffers];
+      let speeds = [1.5, 1, 0.5];
+
+      let M = mat4.create();
+      let R = mat4.create();
+      let Norm = mat4.create();
+      let MV = mat4.create();
+
+      let globalRotationPoint = [2, 0.0, 0];
+      let globalRotationAxis = [1, 0, 1]
+
+      let globalTranslateToOrigin = mat4.create();
+      let globalRotationMatrix = mat4.create();
+      let globalTranslateBack = mat4.create();
+
+      mat4.translate(globalTranslateToOrigin, mat4.create(), [-globalRotationPoint[0], -globalRotationPoint[1], -globalRotationPoint[2]]);
+      mat4.translate(globalTranslateBack, mat4.create(), globalRotationPoint);
+
+
+
+      let then = 0;
+      paused = false;
+      function render(now) {
+         if (!paused) {
+            // Clear the screen before drawing more objects
+            glInit();
+
+            // Draw each object
+            for (let i = 0; i < objects.length; i++) {
+               // Set up the Model matrix for GLSL. We will combine rotation with positioning here
+               mat4.identity(M);
+
+               mat4.multiply(M, M, objects[i].M_model);
+
+               // Calculate current rotation amount
+               let globalDirection = 0.001 * now * speeds[i];
+               mat4.rotate(globalRotationMatrix, mat4.create(), globalDirection, globalRotationAxis);
+
+
+               mat4.multiply(M, M, globalTranslateToOrigin);
+               mat4.multiply(M, M, globalRotationMatrix);
+               mat4.multiply(M, M, globalTranslateBack);
+
+               let ModelLoc = gl.getUniformLocation(shaderprogram, "uModelMatrix");
+               gl.uniformMatrix4fv(ModelLoc, false, new Float32Array(M));
+
+               // calc normal matrix
+               mat4.multiply(MV, M_view, M); //, M_view);
+               mat4.invert(Norm, MV);
+               mat4.transpose(Norm, Norm);
+
+               let NormLoc = gl.getUniformLocation(shaderprogram, "uNormalMatrix");
+               gl.uniformMatrix4fv(NormLoc, false, new Float32Array(Norm));
+
+               drawObject(objects[i], shaderprogram);
+            }
+         }
+
+         // request to re-run this function next time a redraw is needed
+         requestAnimationFrame(render);
+      }
+      requestAnimationFrame(render);
+
+   </script>
+</body>
+
+</html>
